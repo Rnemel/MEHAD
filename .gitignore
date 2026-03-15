@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Large / generated ML artifacts
+*.pth
+*.pt
+*.ckpt
+*.npz
+*.zip
+*.png
