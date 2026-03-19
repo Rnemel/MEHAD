@@ -518,23 +518,27 @@ def train_colab_model(data_dir):
     # Normalize weights so they don't get too small
     class_weights_for_sampler = class_weights_for_sampler / class_weights_for_sampler.sum()
     
-    sample_weights = []
+    # Fast vectorized weight generation
+    sample_weights_list = []
     for f_info in train_ds.file_info:
         path, count, start = f_info
         try:
             with np.load(path, mmap_mode="r") as data:
                 y_file = data["y"][:]
-            for y_val in y_file:
-                sample_weights.append(class_weights_for_sampler[int(y_val)])
+            
+            # Map y_file directly to weights
+            weights = np.vectorize(lambda y: class_weights_for_sampler[y])(y_file)
+            sample_weights_list.append(weights)
         except Exception as e:
             # Fallback if file fails to load
-            for _ in range(count):
-                sample_weights.append(class_weights_for_sampler[0]) # Default to normal class weight
+            sample_weights_list.append(np.full(count, class_weights_for_sampler[0]))
                 
+    sample_weights = np.concatenate(sample_weights_list)
     from torch.utils.data import WeightedRandomSampler
     
     # We will sample the same number of total samples, but heavily weighted towards Seizure/Preictal
-    train_sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
+    # Convert weights back to list for PyTorch to avoid TypeError, though tensor sometimes works depending on version
+    train_sampler = WeightedRandomSampler(weights=sample_weights.tolist(), num_samples=len(sample_weights), replacement=True)
     print("WeightedRandomSampler initialized for Oversampling.")
 
     dl_kwargs = {
