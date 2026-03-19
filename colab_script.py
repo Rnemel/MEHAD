@@ -479,7 +479,7 @@ def train_colab_model(data_dir):
     print(f"TRAIN class counts: {train_counts.tolist()} | pct: {[round(x, 4) for x in train_pct]}")
     print(f"VAL class counts:   {val_counts.tolist()} | pct: {[round(x, 4) for x in val_pct]}")
     
-    # We will use class weights + oversampling for the minority classes to boost recall
+    # We will use class weights in FocalLoss instead of extreme oversampling which crashes I/O on Kaggle
     class_weights_np = compute_class_weights(train_counts, power=0.5, clamp_max=10.0)
     print(f"Class weights: {class_weights_np.tolist()}")
     
@@ -512,34 +512,9 @@ def train_colab_model(data_dir):
             pass
     print(f"Train samples: {len(train_ds)} | Batch size: {batch_size} | Steps/epoch: {int(np.ceil(len(train_ds)/batch_size))}")
     
-    # Calculate sample weights for oversampling
-    print("Calculating sample weights for WeightedRandomSampler...")
-    class_weights_for_sampler = 1.0 / np.maximum(train_counts, 1.0)
-    # Normalize weights so they don't get too small
-    class_weights_for_sampler = class_weights_for_sampler / class_weights_for_sampler.sum()
-    
-    # Fast vectorized weight generation
-    sample_weights_list = []
-    for f_info in train_ds.file_info:
-        path, count, start = f_info
-        try:
-            with np.load(path, mmap_mode="r") as data:
-                y_file = data["y"][:]
-            
-            # Map y_file directly to weights
-            weights = np.vectorize(lambda y: class_weights_for_sampler[y])(y_file)
-            sample_weights_list.append(weights)
-        except Exception as e:
-            # Fallback if file fails to load
-            sample_weights_list.append(np.full(count, class_weights_for_sampler[0]))
-                
-    sample_weights = np.concatenate(sample_weights_list)
-    from torch.utils.data import WeightedRandomSampler
-    
-    # We will sample the same number of total samples, but heavily weighted towards Seizure/Preictal
-    # Convert weights back to list for PyTorch to avoid TypeError, though tensor sometimes works depending on version
-    train_sampler = WeightedRandomSampler(weights=sample_weights.tolist(), num_samples=len(sample_weights), replacement=True)
-    print("WeightedRandomSampler initialized for Oversampling.")
+    # Fast grouped sampler that prevents disk thrashing
+    train_sampler = GroupedShuffleSampler(train_ds, batch_size)
+    print("GroupedShuffleSampler initialized (Fast I/O Mode).")
 
     dl_kwargs = {
         "num_workers": workers,
