@@ -246,19 +246,17 @@ class SeizeIT2Dataset(Dataset):
         self.total_samples = 0
         self.preload_data = {} # Cache for full dataset
         
-        # Check if we can preload everything to RAM (Kaggle P100 usually has ~30GB RAM, data is ~3-4GB)
-        self.use_preload = True
+        # Do NOT preload everything to RAM. Kaggle 30GB RAM is not enough for 378 files uncompressed.
+        # We will use the optimized grouped sampler with direct file reading.
+        self.use_preload = False
         
-        print(f"Reading {len(file_paths)} files...")
-        for i, f in enumerate(tqdm(file_paths, desc="Loading data to RAM")):
+        print(f"Reading metadata for {len(file_paths)} files...")
+        for i, f in enumerate(file_paths):
             try:
-                # Load everything into RAM immediately
-                data = np.load(f)
-                X_cache = data["X"][:]
-                y_cache = data["y"][:]
-                n = y_cache.shape[0]
+                # Only read metadata (shape), not the actual data
+                with np.load(f, mmap_mode="r") as data:
+                    n = data["y"].shape[0]
                 
-                self.preload_data[str(f)] = {"X": X_cache, "y": y_cache}
                 self.file_info.append((f, n, self.total_samples))
                 self.total_samples += n
             except Exception as e:
@@ -501,7 +499,7 @@ def train_colab_model(data_dir):
     
     # Overwrite for Kaggle to force speedup if possible
     if "KAGGLE_KERNEL_RUN_TYPE" in os.environ:
-        workers = min(4, cores)
+        workers = min(2, cores) # reduced from 4 to 2 to save RAM during multiprocessing
         print(f"Kaggle detected: forcing {workers} workers.")
 
     batch_size = 512 # Default bumped up for faster P100/T4 training
