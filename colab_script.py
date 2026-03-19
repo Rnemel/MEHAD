@@ -480,7 +480,8 @@ def train_colab_model(data_dir):
     print(f"VAL class counts:   {val_counts.tolist()} | pct: {[round(x, 4) for x in val_pct]}")
     
     # We will use class weights in FocalLoss instead of extreme oversampling which crashes I/O on Kaggle
-    class_weights_np = compute_class_weights(train_counts, power=0.5, clamp_max=10.0)
+    # We increase the power from 0.5 to 0.8 to give even MORE weight to minority classes
+    class_weights_np = compute_class_weights(train_counts, power=0.8, clamp_max=20.0)
     print(f"Class weights: {class_weights_np.tolist()}")
     
     # Check specs to optimize workers
@@ -552,9 +553,12 @@ def train_colab_model(data_dir):
             return loss.mean()
 
     class_weights = torch.tensor(class_weights_np, dtype=torch.float32)
-    criterion = FocalLoss(alpha=class_weights, gamma=2.0)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+    # Increased gamma from 2.0 to 3.0 to strongly penalize easy examples (Normal class)
+    criterion = FocalLoss(alpha=class_weights, gamma=3.0)
+    
+    # Reduced Learning Rate to prevent jumping to a local minimum that only predicts Normal
+    optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
     
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
     
