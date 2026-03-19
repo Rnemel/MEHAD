@@ -567,7 +567,7 @@ def train_colab_model(data_dir):
     # Early Stopping setup
     best_val_loss = float('inf')
     best_val_macro_f1 = -1.0
-    patience = 5 # Increased to 5 to allow the model more time to recover from temporary spikes
+    patience = 7 # Increased to 7 to allow the model more time to recover from temporary spikes
     patience_counter = 0
     
     # History for plotting
@@ -778,10 +778,10 @@ def train_colab_model(data_dir):
                     shutil.copy("best_model.pth", os.path.join(drive_root, "best_model.pth"))
             except Exception as e:
                 print(f"Warning: Could not save best_model.pth to Drive: {e}")
-            patience = 0
+            patience_counter = 0
         else:
-            patience += 1
-            if patience >= 5:
+            patience_counter += 1
+            if patience_counter >= patience:
                 print("Early stopping triggered!")
                 break
         
