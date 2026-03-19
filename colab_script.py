@@ -567,7 +567,7 @@ def train_colab_model(data_dir):
     # Early Stopping setup
     best_val_loss = float('inf')
     best_val_macro_f1 = -1.0
-    patience = 5 # Increased from 3 to 5 to allow the model more time to recover from temporary spikes
+    patience = 5 # Increased to 5 to allow the model more time to recover from temporary spikes
     patience_counter = 0
     
     # History for plotting
