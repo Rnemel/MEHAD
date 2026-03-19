@@ -278,31 +278,25 @@ class SeizeIT2Dataset(Dataset):
         
         str_path = str(path)
         
-        if self.use_preload and str_path in self.preload_data:
-            x_np = self.preload_data[str_path]["X"][local_idx]
-            y_np = int(self.preload_data[str_path]["y"][local_idx])
-        else:
-            # Fallback (shouldn't happen with use_preload=True)
-            if self.last_accessed_path != str_path:
-                if self.last_accessed_path is not None:
-                    prev = self.open_files.get(self.last_accessed_path)
-                    try:
-                        if prev is not None and hasattr(prev, "close"):
-                            prev.close()
-                    except Exception:
-                        pass
-
-                self.open_files.clear()
-                try:
-                    self.open_files[str_path] = np.load(str_path)
-                    self.last_accessed_path = str_path
-                except Exception as e:
-                    print(f"Error loading {str_path}: {e}")
-                    return torch.zeros(1, 15360), torch.tensor(0, dtype=torch.long)
-                
-            data = self.open_files[str_path]
-            x_np = data["X"][local_idx]
-            y_np = int(data["y"][local_idx])
+        # Standard Loading Strategy (Optimized):
+        if self.last_accessed_path != str_path:
+            # We must load the new file.
+            self.open_files.clear()
+            try:
+                # np.load into memory directly rather than using mmap to avoid disk seeks during __getitem__
+                loaded_npz = np.load(str_path)
+                self.open_files[str_path] = {
+                    "X": loaded_npz["X"][:], # Load fully to RAM to avoid repeated disk reads
+                    "y": loaded_npz["y"][:]
+                }
+                self.last_accessed_path = str_path
+            except Exception as e:
+                print(f"Error loading {str_path}: {e}")
+                return torch.zeros(1, 15360), torch.tensor(0, dtype=torch.long)
+            
+        data = self.open_files[str_path]
+        x_np = data["X"][local_idx]
+        y_np = int(data["y"][local_idx])
         
         x = torch.from_numpy(x_np).float()
         y = torch.tensor(y_np, dtype=torch.long)
@@ -499,8 +493,8 @@ def train_colab_model(data_dir):
     
     # Overwrite for Kaggle to force speedup if possible
     if "KAGGLE_KERNEL_RUN_TYPE" in os.environ:
-        workers = min(2, cores) # reduced from 4 to 2 to save RAM during multiprocessing
-        print(f"Kaggle detected: forcing {workers} workers.")
+        workers = 0 # FORCED to 0 to avoid massive I/O bottlenecks and RAM issues in multiprocessing on Kaggle
+        print(f"Kaggle detected: forcing {workers} workers to fix I/O lockup.")
 
     batch_size = 512 # Default bumped up for faster P100/T4 training
     if device.type == "cuda":
@@ -511,7 +505,7 @@ def train_colab_model(data_dir):
             elif gpu_mem_gb >= 40:
                 batch_size = 512
             elif gpu_mem_gb >= 16:
-                batch_size = 512 # P100 usually has 16GB, 512 is safe and fast
+                batch_size = 256 # Reduced back to 256 to speed up batch formation
         except Exception:
             pass
     print(f"Train samples: {len(train_ds)} | Batch size: {batch_size} | Steps/epoch: {int(np.ceil(len(train_ds)/batch_size))}")
@@ -521,9 +515,10 @@ def train_colab_model(data_dir):
     dl_kwargs = {
         "num_workers": workers,
         "pin_memory": True,
-        "persistent_workers": (workers > 0),
     }
+    # Only use persistent_workers if workers > 0 (prevents ValueError)
     if workers > 0:
+        dl_kwargs["persistent_workers"] = True
         dl_kwargs["prefetch_factor"] = 2
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=train_sampler, **dl_kwargs)
