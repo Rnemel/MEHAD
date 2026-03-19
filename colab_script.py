@@ -478,6 +478,8 @@ def train_colab_model(data_dir):
     val_pct = class_percentages(val_counts)
     print(f"TRAIN class counts: {train_counts.tolist()} | pct: {[round(x, 4) for x in train_pct]}")
     print(f"VAL class counts:   {val_counts.tolist()} | pct: {[round(x, 4) for x in val_pct]}")
+    
+    # We will use class weights + oversampling for the minority classes to boost recall
     class_weights_np = compute_class_weights(train_counts, power=0.5, clamp_max=10.0)
     print(f"Class weights: {class_weights_np.tolist()}")
     
@@ -510,7 +512,30 @@ def train_colab_model(data_dir):
             pass
     print(f"Train samples: {len(train_ds)} | Batch size: {batch_size} | Steps/epoch: {int(np.ceil(len(train_ds)/batch_size))}")
     
-    train_sampler = GroupedShuffleSampler(train_ds, batch_size)
+    # Calculate sample weights for oversampling
+    print("Calculating sample weights for WeightedRandomSampler...")
+    class_weights_for_sampler = 1.0 / np.maximum(train_counts, 1.0)
+    # Normalize weights so they don't get too small
+    class_weights_for_sampler = class_weights_for_sampler / class_weights_for_sampler.sum()
+    
+    sample_weights = []
+    for f_info in train_ds.file_info:
+        path, count, start = f_info
+        try:
+            with np.load(path, mmap_mode="r") as data:
+                y_file = data["y"][:]
+            for y_val in y_file:
+                sample_weights.append(class_weights_for_sampler[int(y_val)])
+        except Exception as e:
+            # Fallback if file fails to load
+            for _ in range(count):
+                sample_weights.append(class_weights_for_sampler[0]) # Default to normal class weight
+                
+    from torch.utils.data import WeightedRandomSampler
+    
+    # We will sample the same number of total samples, but heavily weighted towards Seizure/Preictal
+    train_sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
+    print("WeightedRandomSampler initialized for Oversampling.")
 
     dl_kwargs = {
         "num_workers": workers,
@@ -555,7 +580,7 @@ def train_colab_model(data_dir):
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
     
     # FINAL TRAINING CONFIGURATION
-    num_epochs = 2 if QUICK_TRIAL else 10
+    num_epochs = 2 if QUICK_TRIAL else 30 # Increased to 30 for deeper learning
     best_val_loss = float('inf')
     best_val_macro_f1 = -1.0
     patience = 0
