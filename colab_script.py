@@ -479,9 +479,8 @@ def train_colab_model(data_dir):
     print(f"TRAIN class counts: {train_counts.tolist()} | pct: {[round(x, 4) for x in train_pct]}")
     print(f"VAL class counts:   {val_counts.tolist()} | pct: {[round(x, 4) for x in val_pct]}")
     
-    # We will use class weights in FocalLoss instead of extreme oversampling which crashes I/O on Kaggle
-    # We increase the power from 0.5 to 0.8 to give even MORE weight to minority classes
-    class_weights_np = compute_class_weights(train_counts, power=0.8, clamp_max=20.0)
+    # We will use class weights + oversampling for the minority classes to boost recall
+    class_weights_np = compute_class_weights(train_counts, power=0.5, clamp_max=10.0)
     print(f"Class weights: {class_weights_np.tolist()}")
     
     # Check specs to optimize workers
@@ -513,9 +512,30 @@ def train_colab_model(data_dir):
             pass
     print(f"Train samples: {len(train_ds)} | Batch size: {batch_size} | Steps/epoch: {int(np.ceil(len(train_ds)/batch_size))}")
     
-    # Fast grouped sampler that prevents disk thrashing
-    train_sampler = GroupedShuffleSampler(train_ds, batch_size)
-    print("GroupedShuffleSampler initialized (Fast I/O Mode).")
+    # Calculate sample weights for oversampling
+    print("Calculating sample weights for WeightedRandomSampler...")
+    class_weights_for_sampler = 1.0 / np.maximum(train_counts, 1.0)
+    # Normalize weights so they don't get too small
+    class_weights_for_sampler = class_weights_for_sampler / class_weights_for_sampler.sum()
+    
+    sample_weights = []
+    for f_info in train_ds.file_info:
+        path, count, start = f_info
+        try:
+            with np.load(path, mmap_mode="r") as data:
+                y_file = data["y"][:]
+            for y_val in y_file:
+                sample_weights.append(class_weights_for_sampler[int(y_val)])
+        except Exception as e:
+            # Fallback if file fails to load
+            for _ in range(count):
+                sample_weights.append(class_weights_for_sampler[0]) # Default to normal class weight
+                
+    from torch.utils.data import WeightedRandomSampler
+    
+    # We will sample the same number of total samples, but heavily weighted towards Seizure/Preictal
+    train_sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
+    print("WeightedRandomSampler initialized for Oversampling.")
 
     dl_kwargs = {
         "num_workers": workers,
@@ -553,22 +573,18 @@ def train_colab_model(data_dir):
             return loss.mean()
 
     class_weights = torch.tensor(class_weights_np, dtype=torch.float32)
-    # Increased gamma from 2.0 to 3.0 to strongly penalize easy examples (Normal class)
     criterion = FocalLoss(alpha=class_weights, gamma=3.0)
-    
-    # Reduced Learning Rate to prevent jumping to a local minimum that only predicts Normal
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
     
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
     
     # FINAL TRAINING CONFIGURATION
     num_epochs = 2 if QUICK_TRIAL else 30 # Increased to 30 for deeper learning
-    # Early Stopping setup
     best_val_loss = float('inf')
     best_val_macro_f1 = -1.0
-    patience = 7 # Increased to 7 to allow the model more time to recover from temporary spikes
-    patience_counter = 0
+    patience = 0
+    early_stopping_patience = 7
     
     # History for plotting
     history = {
@@ -688,6 +704,8 @@ def train_colab_model(data_dir):
                 loss = criterion(out, y)
                 
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
             
@@ -761,13 +779,14 @@ def train_colab_model(data_dir):
         print(f"VAL true dist: {val_true_dist} | pred dist: {val_pred_dist}")
         print(f"VAL macro F1: {val_macro_f1:.4f} | per-class recall: {[round(x, 4) for x in val_recalls]}")
         
-        scheduler.step(avg_val_loss)
+        scheduler.step(val_macro_f1)
         
         improved = False
         if val_macro_f1 > best_val_macro_f1:
             best_val_macro_f1 = val_macro_f1
+            best_val_loss = avg_val_loss
             improved = True
-        if avg_val_loss < best_val_loss:
+        elif val_macro_f1 == best_val_macro_f1 and avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             improved = True
 
@@ -778,10 +797,10 @@ def train_colab_model(data_dir):
                     shutil.copy("best_model.pth", os.path.join(drive_root, "best_model.pth"))
             except Exception as e:
                 print(f"Warning: Could not save best_model.pth to Drive: {e}")
-            patience_counter = 0
+            patience = 0
         else:
-            patience_counter += 1
-            if patience_counter >= patience:
+            patience += 1
+            if patience >= early_stopping_patience:
                 print("Early stopping triggered!")
                 break
         
